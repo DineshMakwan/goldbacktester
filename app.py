@@ -8,7 +8,6 @@ from datetime import datetime, time
 # Page Config
 st.set_page_config(page_title="Pro XAUUSD Multi-Indicator Backtester", layout="wide", page_icon="📈")
 
-# Title & Description
 st.title("🥇 Pro XAUUSD & Multi-Asset Backtester")
 st.caption("Test multi-indicator confluence strategies with custom risk, session time filters, and detailed trade execution logs.")
 
@@ -17,7 +16,7 @@ st.caption("Test multi-indicator confluence strategies with custom risk, session
 # ==========================================
 st.sidebar.header("1. Asset & Timeframe Setup")
 ticker = st.sidebar.text_input("Ticker Symbol", value="XAUUSD=X", help="Examples: XAUUSD=X (Gold), GC=F (Gold Futures), RELIANCE.NS, EURUSD=X")
-period = st.sidebar.selectbox("Data Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+period = st.sidebar.selectbox("Data Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=2)
 interval = st.sidebar.selectbox("Timeframe", ["5m", "15m", "30m", "60m", "1d"], index=3)
 
 st.sidebar.header("2. Trading Time Window (UTC/IST Filter)")
@@ -28,10 +27,10 @@ end_time_input = st.sidebar.time_input("Session End Time", time(21, 0))
 st.sidebar.header("3. Risk & Capital Settings")
 initial_capital = st.sidebar.number_input("Initial Capital ($)", value=1000.0, step=100.0)
 lot_size = st.sidebar.number_input("Lot Size (1 Lot = $100 per $1 move)", value=0.10, step=0.01)
-sl_dollars = st.sidebar.number_input("Stop Loss ($ Price Offset)", value=5.0, step=0.5, help="Example: $5.0 SL means if entry is $2000, SL is $1995 for BUY")
-tp_dollars = st.sidebar.number_input("Take Profit ($ Price Offset)", value=10.0, step=0.5, help="Example: $10.0 TP means if entry is $2000, TP is $2010 for BUY")
+sl_dollars = st.sidebar.number_input("Stop Loss ($ Price Offset)", value=5.0, step=0.5)
+tp_dollars = st.sidebar.number_input("Take Profit ($ Price Offset)", value=10.0, step=0.5)
 
-st.sidebar.header("4. Indicator Confluence Selection (Min 1 Enabled)")
+st.sidebar.header("4. Indicator Confluence Selection")
 # 1. EMA Crossover
 use_ema = st.sidebar.checkbox("1. EMA Crossover", value=True)
 fast_ema_p = st.sidebar.number_input("Fast EMA Period", value=9, min_value=1)
@@ -84,6 +83,25 @@ use_breakout = st.sidebar.checkbox("10. High/Low Donchian Breakout", value=False
 breakout_period = st.sidebar.number_input("Breakout Lookback Candles", value=20)
 
 run_button = st.sidebar.button("⚡ Run Backtest", use_container_width=True)
+
+# ==========================================
+# ROBUST DATA FETCHING FUNCTION
+# ==========================================
+def load_data(symbol, p, i):
+    try:
+        ticker_obj = yf.Ticker(symbol)
+        df = ticker_obj.history(period=p, interval=i)
+        
+        if df.empty:
+            df = yf.download(symbol, period=p, interval=i, progress=False)
+            
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        return df
+    except Exception as e:
+        st.error(f"Data Fetching Error: {e}")
+        return pd.DataFrame()
 
 # ==========================================
 # INDICATOR CALCULATION FUNCTIONS
@@ -174,23 +192,18 @@ def calculate_indicators(df):
 # MAIN BACKTEST LOGIC
 # ==========================================
 if run_button:
-    with st.spinner("Fetching Historical Data from Yahoo Finance..."):
-        df = yf.download(ticker, period=period, interval=interval)
+    with st.spinner(f"Fetching Historical Data for {ticker}..."):
+        df = load_data(ticker, period, interval)
         
-    if df.empty:
-        st.error("❌ No data returned. Check ticker symbol or timeframe compatibility!")
+    if df.empty or len(df) < 30:
+        st.error("❌ No data returned. Try changing Period to '1mo' and Timeframe to '60m' or try ticker 'GC=F'.")
     else:
-        # Clean multi-index columns if returned
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-            
         df = calculate_indicators(df)
         
         # Determine Signals
         df['Buy_Condition'] = True
         df['Sell_Condition'] = True
         
-        # Confluence Checks
         if use_ema:
             df['Buy_Condition'] &= (df['EMA_Fast'] > df['EMA_Slow'])
             df['Sell_Condition'] &= (df['EMA_Fast'] < df['EMA_Slow'])
@@ -247,7 +260,7 @@ if run_button:
         
         balance = initial_capital
         balance_history = []
-        usd_per_dollar_move = lot_size * 100.0  # 1 lot = $100 per $1 move in Gold
+        usd_per_dollar_move = lot_size * 100.0
 
         for i in range(len(df)):
             current_time = df.index[i]
@@ -255,7 +268,6 @@ if run_button:
             current_high = df['High'].iloc[i]
             current_low = df['Low'].iloc[i]
             
-            # Check Position Exit
             if in_position:
                 if pos_type == 'BUY':
                     if current_low <= sl_price:
@@ -281,7 +293,6 @@ if run_button:
                         trades.append({'ID': len(trades)+1, 'Type': 'SELL', 'Entry_Time': entry_time, 'Exit_Time': current_time, 'Entry': entry_price, 'Exit': tp_price, 'Result': 'TP HIT', 'PnL_$': pnl, 'Balance': balance})
                         in_position = False
 
-            # Check Position Entry
             if not in_position:
                 if df['Buy_Condition'].iloc[i]:
                     in_position = True
@@ -330,17 +341,14 @@ if run_button:
         st.subheader("📈 Interactive Price & Trades Chart")
         fig = go.Figure()
         
-        # Candlestick
         fig.add_trace(go.Candlestick(
             x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'
         ))
         
-        # Plot Indicators if enabled
         if use_ema:
             fig.add_trace(go.Scatter(x=df.index, y=df['EMA_Fast'], mode='lines', name=f'Fast EMA ({fast_ema_p})', line=dict(color='cyan', width=1)))
             fig.add_trace(go.Scatter(x=df.index, y=df['EMA_Slow'], mode='lines', name=f'Slow EMA ({slow_ema_p})', line=dict(color='magenta', width=1)))
 
-        # Plot Buy/Sell Trade Signals on Chart
         if not trades_df.empty:
             buy_trades = trades_df[trades_df['Type'] == 'BUY']
             sell_trades = trades_df[trades_df['Type'] == 'SELL']
@@ -357,7 +365,6 @@ if run_button:
         fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # Equity Growth Line Graph
         st.subheader("📊 Equity Growth Curve (PnL)")
         equity_color = "green" if total_pnl >= 0 else "red"
         
@@ -369,14 +376,10 @@ if run_button:
         fig_equity.update_layout(height=350, template="plotly_dark", yaxis_title="Balance ($)")
         st.plotly_chart(fig_equity, use_container_width=True)
 
-        # ==========================================
-        # TRADE EXPORT & LOG TABLE
-        # ==========================================
         st.subheader("📋 Trade Execution Log Table")
         if not trades_df.empty:
             st.dataframe(trades_df, use_container_width=True)
             
-            # Download CSV Button
             csv_data = trades_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download Trade History (CSV)",
@@ -385,6 +388,6 @@ if run_button:
                 mime="text/csv"
             )
         else:
-            st.warning("No trades were triggered with the selected indicator rules.")
+            st.warning("No trades were triggered with the selected indicator rules. Try relaxing indicator conditions (e.g., uncheck 1 or 2 indicators).")
 else:
     st.info("👈 Sidebar se apne parameters adjust karein aur **⚡ Run Backtest** button par click karein!")
